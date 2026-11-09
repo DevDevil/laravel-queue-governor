@@ -1,0 +1,53 @@
+[Unit]
+Description=lqg — load-aware queue governor for Laravel
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/lqg run --config /etc/lqg/config.yaml
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=2
+
+# Runs as root: the runner drops privileges per exec via
+# SysProcAttr.Credential (setuid), not sudo — this is what lets one
+# daemon run every app's queue worker as that app's own configured user.
+# NoNewPrivileges is deliberately NOT set here — it would block the
+# setuid syscalls the runner depends on.
+#
+# Group=lqg (not the process's privilege — it's still root) just makes
+# RuntimeDirectory below get created root:lqg, matching the unix
+# socket's own root:lqg 0660 (internal/monitor.Server chmod/chown), so
+# members of the lqg group can reach it without being root.
+Group=lqg
+RuntimeDirectory=lqg
+RuntimeDirectoryMode=0750
+
+ProtectSystem=strict
+ProtectHome=true
+
+# AF_UNIX for lqg's own IPC (unix socket only, never a TCP port for
+# monitoring) — but this restriction also applies to every
+# queue-worker process the runner execs, and a real app's own DB/Redis
+# connection is routinely TCP (e.g. DB_HOST=127.0.0.1), not a unix
+# socket. AF_UNIX-only here silently breaks that: the worker starts,
+# runs long enough to look like it did work, but every DB/Redis call
+# fails to connect. AF_INET/AF_INET6 cover that without giving up
+# hardening against the address families no legitimate use here needs
+# (AF_PACKET, AF_NETLINK, etc.).
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+# IMPORTANT — read before enabling this unit:
+# ProtectSystem=strict mounts the entire filesystem read-only for this
+# service AND every process it execs, including each configured app's
+# queue worker. A real Laravel app needs to write its own logs/cache/
+# sessions (storage/logs, storage/framework/*, etc.) — /run/lqg alone
+# is not enough. Add every configured app's writable path here, space-
+# separated (prefer `sudo systemctl edit lqg` for a drop-in override
+# over editing this file directly, so packaging updates don't clobber
+# your list):
+#   ReadWritePaths=/run/lqg /var/www/wonen31/storage /var/www/squaremanager/storage
+ReadWritePaths=/run/lqg
+
+[Install]
+WantedBy=multi-user.target

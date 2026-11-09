@@ -1,0 +1,38 @@
+global:
+  socket_path: /run/lqg/lqg.sock
+  check_interval: 5
+  max_system_load: 6.0
+  max_iowait: 25
+  max_concurrent_jobs: 2
+  log_level: info
+
+apps:
+  - name: wonen31
+    path: /var/www/wonen31
+    user: www-data
+    php_binary: /usr/bin/php8.3
+    connection: redis
+    queues: [default, emails]
+    mode: per_job
+    batch_size: 10
+    max_load: 4.0
+    max_iowait: 20
+    max_concurrent: 1
+    min_interval: 2
+    spike_cooldown: 30
+    priority: 10
+
+  - name: squaremanager
+    path: /var/www/squaremanager
+    user: www-data
+    php_binary: /usr/bin/php8.4
+    connection: database
+    queues: [default]
+    mode: batch
+    batch_size: 25
+    max_load: 3.0
+    max_iowait: 20
+    max_concurrent: 1
+    min_interval: 1
+    spike_cooldown: 20
+    priority: 5

@@ -1,0 +1,51 @@
+# lqg sample config — copy to /etc/lqg/config.yaml and edit for your
+# apps (see docs/configuration.md). Validate before starting the service:
+#   sudo lqg validate /etc/lqg/config.yaml
+#
+# Reminder: if you enable the systemd unit's ProtectSystem=strict
+# hardening (packaging/lqg.service), each app's writable paths below
+# (storage/logs, storage/framework/*, etc.) also need to be added to
+# that unit's ReadWritePaths, or the queue worker won't be able to write
+# its own logs/cache.
+
+global:
+  socket_path: /run/lqg/lqg.sock
+  check_interval: 5           # seconds between load polls
+  max_system_load: 6.0        # hard ceiling across ALL apps (absolute loadavg)
+  max_iowait: 25              # percent; global I/O ceiling
+  max_concurrent_jobs: 2      # total simultaneous artisan processes
+  log_level: info
+  nice: 0                     # OS scheduling niceness for every worker (-20..19, 0 = untouched); per-app `nice` overrides this
+
+apps:
+  - name: wonen31
+    path: /var/www/wonen31
+    user: www-data
+    php_binary: /usr/bin/php8.3   # per-app: different PHP versions supported
+    connection: redis
+    queues: [default, emails]     # dispatched in priority order
+    mode: per_job                 # per_job | batch
+    batch_size: 10                # only used in batch mode
+    max_load: 4.0                 # this app's own ceiling
+    max_iowait: 20                # this app's own iowait ceiling (%)
+    max_concurrent: 1             # simultaneous processes for THIS app
+    min_interval: 2               # min seconds between this app's jobs
+    spike_cooldown: 30            # extra pause after a load spike
+    priority: 10                  # higher = preferred in fair dispatch (optional)
+    nice: 5                       # OS scheduling niceness for THIS app's worker only (optional; overrides global.nice)
+    json_output: true             # add --json to queue:work, so the dashboard can show real per-job status (optional; requires a Laravel version whose queue:work supports --json)
+
+  - name: squaremanager
+    path: /var/www/squaremanager
+    user: www-data
+    php_binary: /usr/bin/php8.4
+    connection: database
+    queues: [default]
+    mode: batch
+    batch_size: 25
+    max_load: 3.0
+    max_iowait: 20
+    max_concurrent: 1
+    min_interval: 1
+    spike_cooldown: 20
+    priority: 5
