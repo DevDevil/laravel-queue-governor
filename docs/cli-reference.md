@@ -38,10 +38,16 @@ lqg status [--socket path]
 
 ```
 $ lqg status
-NAME           STATE      LOAD  IOWAIT  JOBS  LAST DISPATCH         REASON
-saas_seed_spa  running    2.57  0.0%    14    2026-08-08T14:39:38Z  -
-wonen31        throttled  4.29  0.0%    3     never                 app_load_high
+NAME           STATE      LOAD  IOWAIT  JOBS  LAST DISPATCH         REASON         SCHEDULER
+saas_seed_spa  running    2.57  0.0%    14    2026-08-08T14:39:38Z  -              schedule:run exit 0 (1.2s)  next 41s
+wonen31        throttled  4.29  0.0%    3     never                 app_load_high  -
 ```
+
+`SCHEDULER` is `-` unless the app has `scheduler.enabled` (see
+[`configuration.md`](configuration.md#scheduler-optional-per-app)); otherwise
+it shows whether `schedule:run` is running, the last run's exit code and
+duration, the most recent skip (if newer than the last run), and when it's
+next due.
 
 `REASON` is `-` when an app is dispatched/running with nothing to explain;
 otherwise it's one of the skip-reason vocabulary (`app_load_high`,

@@ -61,9 +61,32 @@ type AppConfig struct {
 	// is set" — distinct from "not configured, inherit global.nice".
 	Nice *int `yaml:"nice"`
 
+	// Scheduler optionally has lqg also run this app's Laravel scheduler
+	// (`artisan schedule:run`) once a minute (PLAN.md §6.1). The zero value
+	// (enabled: false) is exactly the pre-scheduler behaviour.
+	Scheduler SchedulerConfig `yaml:"scheduler"`
+
 	// ResolvedUID/ResolvedGID are populated by Validate, never by YAML —
 	// CLAUDE.md: "uid/gid come only from validated config," so the runner
 	// never looks the user up itself.
 	ResolvedUID uint32 `yaml:"-"`
 	ResolvedGID uint32 `yaml:"-"`
+}
+
+// SchedulerConfig is an app's optional `schedule:run` setup (PLAN.md §6.1).
+type SchedulerConfig struct {
+	// Enabled runs `<php_binary> artisan schedule:run` once a minute, as
+	// the app's user, through the same exec path as queue:work.
+	Enabled bool `yaml:"enabled"`
+
+	// RespectLoad subjects schedule:run to the same load/iowait ceilings
+	// (own, then global) and the global concurrency cap as queue workers.
+	// Off by default: the scheduler is time-critical, so by default only
+	// the no-overlap rule can skip a minute.
+	RespectLoad bool `yaml:"respect_load"`
+
+	// Stagger offsets this app's run by a fixed number of seconds within
+	// the minute (derived from a hash of the app name), so many apps
+	// don't all start schedule:run at :00.
+	Stagger bool `yaml:"stagger"`
 }

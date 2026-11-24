@@ -50,3 +50,48 @@ func Events(now time.Time, decisions []scheduler.Decision, apps []*scheduler.App
 	}
 	return events
 }
+
+// ScheduleEvents converts one schedule tick's decisions (PLAN.md §6.1)
+// into wire-format events, Kind "schedule": "dispatched" for a started
+// schedule:run, "skipped" with a reason otherwise. State is "running" for
+// a started run, "idle" for a skip — it describes the schedule:run, not
+// the app's queue FSM. Call after ScheduleTick has updated each app's
+// ScheduleState, so the embedded Schedule status is current.
+func ScheduleEvents(now time.Time, decisions []scheduler.ScheduleDecision) []ipc.DecisionEvent {
+	events := make([]ipc.DecisionEvent, len(decisions))
+	for i, d := range decisions {
+		e := ipc.DecisionEvent{
+			Timestamp: now,
+			App:       d.App.Config.Name,
+			Kind:      ipc.KindSchedule,
+			Load:      d.Load,
+			IOWait:    d.IOWait,
+			Schedule:  ScheduleStatus(now, d.App),
+		}
+		if d.Run {
+			e.Decision = "dispatched"
+			e.State = "running"
+		} else {
+			e.Decision = "skipped"
+			e.State = "idle"
+			reason := string(d.Reason)
+			e.Reason = &reason
+		}
+		events[i] = e
+	}
+	return events
+}
+
+// ScheduleCompletedEvent is the Kind "schedule", Decision "completed"
+// event for a finished schedule:run — its exit code and duration are in
+// the embedded Schedule status.
+func ScheduleCompletedEvent(now time.Time, app *scheduler.App) ipc.DecisionEvent {
+	return ipc.DecisionEvent{
+		Timestamp: now,
+		App:       app.Config.Name,
+		Kind:      ipc.KindSchedule,
+		Decision:  "completed",
+		State:     "idle",
+		Schedule:  ScheduleStatus(now, app),
+	}
+}

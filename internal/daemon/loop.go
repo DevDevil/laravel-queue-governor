@@ -9,8 +9,10 @@ import (
 	"io"
 	"time"
 
+	"github.com/DevDevil/laravel-queue-governor/internal/appstate"
 	"github.com/DevDevil/laravel-queue-governor/internal/clock"
 	"github.com/DevDevil/laravel-queue-governor/internal/config"
+	"github.com/DevDevil/laravel-queue-governor/internal/ipc"
 	"github.com/DevDevil/laravel-queue-governor/internal/monitor"
 	"github.com/DevDevil/laravel-queue-governor/internal/runner"
 	"github.com/DevDevil/laravel-queue-governor/internal/scheduler"
@@ -55,6 +57,18 @@ type runJobEvent struct {
 	app   *scheduler.App
 	pid   int
 	event runner.JobEvent
+}
+
+// scheduleResult is what a schedule:run (PLAN.md §6.1) reports back once
+// it finishes. state is the exact ScheduleState the run was started
+// against: if a reload disabled the scheduler for this app in the
+// meantime (app.Schedule now nil or a fresh state), the result is
+// dropped instead of being attributed to state it doesn't belong to.
+type scheduleResult struct {
+	app    *scheduler.App
+	state  *appstate.ScheduleState
+	result runner.RunResult
+	err    error
 }
 
 // reloadRequest is a validated config waiting to be applied by Run's own
@@ -178,7 +192,14 @@ func (l *Loop) Run(ctx context.Context) {
 	// stall waiting for the main loop to drain it mid-tick.
 	jobEvents := make(chan runJobEvent, notifyChanCap*jobEventsCapMultiplier)
 
+	scheduleResults := make(chan scheduleResult, notifyChanCap)
+
 	timer := l.Clock.After(l.CheckInterval)
+	// scheduleTimer fires when the next app's schedule:run minute comes
+	// due (PLAN.md §6.1) — nil (blocks forever in select) when no app has
+	// the scheduler enabled, so a config without it behaves exactly as
+	// before. Re-armed after every schedule tick and every reload.
+	scheduleTimer := l.scheduleTimer()
 	for {
 		select {
 		case <-ctx.Done():
@@ -186,6 +207,11 @@ func (l *Loop) Run(ctx context.Context) {
 		case <-timer:
 			l.tick(ctx, results, starts, jobEvents)
 			timer = l.Clock.After(l.CheckInterval)
+		case <-scheduleTimer:
+			l.scheduleTick(ctx, scheduleResults)
+			scheduleTimer = l.scheduleTimer()
+		case r := <-scheduleResults:
+			l.completeSchedule(r)
 		case rs := <-starts:
 			rs.app.Machine.RecordRunStarted(rs.pid, rs.start)
 		case je := <-jobEvents:
@@ -194,6 +220,7 @@ func (l *Loop) Run(ctx context.Context) {
 			l.complete(r)
 		case req := <-l.reload:
 			l.applyReload(req)
+			scheduleTimer = l.scheduleTimer()
 		case req := <-l.snapshot:
 			req.resp <- l.effectiveConfig()
 		}
@@ -301,4 +328,69 @@ func (l *Loop) complete(r runResult) {
 	}
 
 	r.app.Machine.OnRunComplete(now, didWork, spike, r.started)
+}
+
+// scheduleTimer arms a timer for the earliest due schedule:run across all
+// apps, or returns nil if no app has the scheduler enabled.
+func (l *Loop) scheduleTimer() <-chan time.Time {
+	now := l.Clock.Now()
+	due, ok := l.Scheduler.NextScheduleDue(now)
+	if !ok {
+		return nil
+	}
+	d := due.Sub(now)
+	if d < 0 {
+		d = 0
+	}
+	return l.Clock.After(d)
+}
+
+// scheduleTick resolves every app whose schedule:run minute is due
+// (Scheduler.ScheduleTick), publishes a schedule decision event for each,
+// and starts the runs it decided on.
+func (l *Loop) scheduleTick(ctx context.Context, results chan<- scheduleResult) {
+	now := l.Clock.Now()
+	decisions := l.Scheduler.ScheduleTick(now)
+	if len(decisions) == 0 {
+		return
+	}
+
+	events := monitor.ScheduleEvents(now, decisions)
+	l.Bus.Publish(events)
+	for i, d := range decisions {
+		l.Snapshots.PatchSchedule(d.App.Config.Name, events[i].Schedule)
+		if !d.Run {
+			fmt.Fprintf(l.Stderr, "schedule:run for %s skipped: %s\n", d.App.Config.Name, d.Reason)
+			continue
+		}
+		l.startSchedule(ctx, d.App, results)
+	}
+}
+
+func (l *Loop) startSchedule(ctx context.Context, app *scheduler.App, results chan<- scheduleResult) {
+	spec := runner.BuildScheduleSpec(l.Scheduler.Global, app.Config)
+	state := app.Schedule
+	go func() {
+		result, err := l.Runner.Run(ctx, spec, runner.RunHooks{})
+		results <- scheduleResult{app: app, state: state, result: result, err: err}
+	}()
+}
+
+func (l *Loop) completeSchedule(r scheduleResult) {
+	name := r.app.Config.Name
+	switch {
+	case r.err != nil:
+		fmt.Fprintf(l.Stderr, "schedule:run failed for %s: %v\n", name, r.err)
+	case r.result.ExitCode != 0:
+		fmt.Fprintf(l.Stderr, "schedule:run for %s exited %d after %s\n", name, r.result.ExitCode, r.result.Duration.Round(time.Millisecond))
+	}
+
+	if r.app.Schedule != r.state {
+		return // scheduler disabled (or reset) for this app since the run started
+	}
+	r.state.OnComplete(r.result.ExitCode, r.result.Duration)
+	now := l.Clock.Now()
+	ev := monitor.ScheduleCompletedEvent(now, r.app)
+	l.Bus.Publish([]ipc.DecisionEvent{ev})
+	l.Snapshots.PatchSchedule(name, ev.Schedule)
 }

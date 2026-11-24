@@ -34,6 +34,10 @@ apps:
     priority: 10                  # higher = preferred in fair dispatch (optional)
     nice: 5                       # OS scheduling niceness for THIS app's worker only (optional; overrides global.nice)
     json_output: true             # add --json to queue:work, so the dashboard can show real per-job status (optional; requires a Laravel version whose queue:work supports --json)
+    scheduler:                    # optional: run `artisan schedule:run` every minute (remove the app's own cron entry)
+      enabled: true               # default false
+      respect_load: false         # default false: skip on high load/iowait/full concurrency
+      stagger: true               # default false: start at a per-app second within the minute instead of :00
 
   - name: squaremanager
     path: /var/www/squaremanager

@@ -179,6 +179,10 @@ func validateApp(app *AppConfig, g *GlobalConfig, i int, seen map[string]bool) (
 		errs = append(errs, fmt.Sprintf("%s: max_concurrent must be > 0", label))
 	}
 
+	if !app.Scheduler.Enabled && (app.Scheduler.RespectLoad || app.Scheduler.Stagger) {
+		warnings = append(warnings, fmt.Sprintf("%s: scheduler.respect_load/stagger set but scheduler.enabled is false — schedule:run will not run", label))
+	}
+
 	if app.MaxLoad > g.MaxSystemLoad {
 		warnExceedsGlobal(&warnings, label, "max_load", fmt.Sprintf("%.2f", app.MaxLoad), "max_system_load", fmt.Sprintf("%.2f", g.MaxSystemLoad))
 	}

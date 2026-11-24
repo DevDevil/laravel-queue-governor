@@ -46,6 +46,42 @@ warnings only (printed, but the config still loads) — noted below.
 | `nice`            | int -20..19, optional | OS niceness for *this app's* worker only — overrides `global.nice`. Because it's genuinely optional (distinct from "unset"), you can explicitly set `nice: 0` to opt an app back into normal priority even while `global.nice` is non-zero elsewhere. |
 | `json_output`     | bool, default `false` | Adds `--json` to this app's `queue:work` invocation. Requires a Laravel version whose `queue:work` supports it. When set, the runner parses real per-job status (job class, `starting`/`success`/`released_after_exception`/`failed`) off stdout — shown live in `lqg watch`'s per-app sub-items, and used to gate opening a 2nd/3rd concurrent slot on *confirmed* work rather than an idle poll. |
 
+### `scheduler:` (optional, per app)
+
+Has `lqg` also run the app's Laravel scheduler — `php artisan schedule:run`,
+as the app's `user` — once a minute, so you don't need a separate cron entry
+per app and the scheduler shows up in `lqg status`/`lqg watch`.
+
+| Field           | Type    | Meaning |
+|------------------|---------|---------|
+| `enabled`        | bool, default `false` | Run `schedule:run` every minute. `false` (or no `scheduler:` block) = exactly the old behaviour. |
+| `respect_load`   | bool, default `false` | Skip a minute when this app's or the global load/I/O-wait ceiling is exceeded, or `max_concurrent_jobs` is full. Off by default: scheduled tasks are time-critical. |
+| `stagger`        | bool, default `false` | Start at a fixed per-app second within the minute (derived from the app name) instead of `:00`, so many apps don't all start at once. |
+
+Behaviour:
+
+- **Never overlaps itself:** if the previous `schedule:run` for the app is
+  still running when the next minute comes due, that minute is skipped
+  (`schedule_overlap`, logged).
+- **Counts towards `max_concurrent_jobs`:** while it runs, queue workers get
+  one slot fewer. With `respect_load: false` it starts even when that cap is
+  full.
+- Setting `respect_load`/`stagger` without `enabled: true` gives a warning.
+- Enable/disable by editing the file and `systemctl reload lqg` — no restart.
+  Not changeable from the live-tune overlay.
+- Remove the app's old cron entry (`* * * * * php artisan schedule:run`)
+  when you enable this, or the scheduler runs twice.
+
+```yaml
+apps:
+  - name: shop-a
+    # ... queue settings ...
+    scheduler:
+      enabled: true
+      respect_load: false
+      stagger: true
+```
+
 ## A two-app example
 
 ```yaml
@@ -75,6 +111,9 @@ apps:
     priority: 10
     nice: 5
     json_output: true
+    scheduler:
+      enabled: true
+      stagger: true
 
   - name: squaremanager
     path: /var/www/squaremanager

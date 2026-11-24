@@ -35,6 +35,10 @@ flattening the box.
   round-robin scheduling against the other apps.
 - **`per_job` or `batch` dispatch modes** per app — fine-grained load
   re-checking between every job, or higher-throughput batches.
+- **Optional Laravel scheduler per app** — `lqg` can also run each app's
+  `schedule:run` every minute (no cron entry per app), never overlapping
+  itself, optionally staggered within the minute and/or load-aware, and
+  visible in `lqg status`/`lqg watch`.
 - **Framework-agnostic** — it execs `artisan`, nothing else. No Laravel
   internals, no version coupling. Each app can use its own PHP binary.
 - **Safe privilege drop** — one root daemon execs each app's worker as that

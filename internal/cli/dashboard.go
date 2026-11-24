@@ -252,6 +252,7 @@ func (m *dashboardModel) apply(f dashboardFrame) {
 				SpikeCooldown:    a.SpikeCooldown,
 				Priority:         a.Priority,
 				Nice:             a.Nice,
+				Schedule:         a.Schedule,
 			}
 			m.appOrder = append(m.appOrder, a.Name)
 		}
@@ -267,6 +268,13 @@ func (m *dashboardModel) apply(f dashboardFrame) {
 			row = &dashboardAppRow{Name: d.App}
 			m.appRows[d.App] = row
 			m.appOrder = append(m.appOrder, d.App)
+		}
+		if d.Kind == ipc.KindSchedule {
+			// A schedule:run decision says nothing about the app's queue
+			// FSM — only its schedule status and the log change.
+			row.Schedule = d.Schedule
+			m.logEntries = appendCappedLogEntries(m.logEntries, formatScheduleLogEntry(d.DecisionEvent), dashLogCapacity)
+			return
 		}
 		row.State = d.State
 		row.Load = d.Load
