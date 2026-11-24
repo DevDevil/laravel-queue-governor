@@ -39,6 +39,10 @@ flattening the box.
   `schedule:run` every minute (no cron entry per app), never overlapping
   itself, optionally staggered within the minute and/or load-aware, and
   visible in `lqg status`/`lqg watch`.
+- **Optional log file per app** — set `log_dir` and each app gets its own
+  log with its workers' stdout/stderr and the daemon's decisions about it,
+  next to a separate `lqg.log` for the daemon itself. Reopened on `SIGUSR1`,
+  with a logrotate config included.
 - **Framework-agnostic** — it execs `artisan`, nothing else. No Laravel
   internals, no version coupling. Each app can use its own PHP binary.
 - **Safe privilege drop** — one root daemon execs each app's worker as that

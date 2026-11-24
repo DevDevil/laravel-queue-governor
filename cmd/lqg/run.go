@@ -16,6 +16,7 @@ import (
 	"github.com/DevDevil/laravel-queue-governor/internal/config"
 	"github.com/DevDevil/laravel-queue-governor/internal/configfile"
 	"github.com/DevDevil/laravel-queue-governor/internal/daemon"
+	"github.com/DevDevil/laravel-queue-governor/internal/logsink"
 	"github.com/DevDevil/laravel-queue-governor/internal/metrics"
 	"github.com/DevDevil/laravel-queue-governor/internal/monitor"
 	"github.com/DevDevil/laravel-queue-governor/internal/runner"
@@ -69,6 +70,15 @@ func runDaemon(configPath string) error {
 		return err
 	}
 
+	// Log files (PLAN.md §8.1): with global.log_dir / apps[].log_file
+	// unset this is a pass-through to stderr, i.e. the old behaviour.
+	logs := logsink.New(os.Stderr)
+	if err := logs.Configure(logTargets(cfg)); err != nil {
+		return err
+	}
+	defer logs.Close()
+	daemonLog := logs.Daemon()
+
 	sched := scheduler.New(cfg.Global, cfg.Apps, metrics.NewProcSource())
 
 	// Independent of sched's own metrics.Source: ProcSource does stateful
@@ -76,7 +86,7 @@ func runDaemon(configPath string) error {
 	// sampling and this fixed ~1s sampling need their own instances, or
 	// they'd corrupt each other's deltas (internal/monitor.MetricSampler).
 	sampler := monitor.NewMetricSampler(metrics.NewProcSource(), clock.RealClock{}, metricSampleInterval, runtime.NumCPU(), monitor.DefaultMetricHistorySize, monitor.Ceilings{MaxLoad: cfg.Global.MaxSystemLoad, MaxIOWait: float64(cfg.Global.MaxIOWait)})
-	sampler.Stderr = os.Stderr
+	sampler.Stderr = daemonLog
 
 	srv := &monitor.Server{
 		Snapshots:     monitor.NewSnapshotStore(),
@@ -93,20 +103,21 @@ func runDaemon(configPath string) error {
 
 	go func() {
 		if err := srv.Serve(); err != nil {
-			fmt.Fprintf(os.Stderr, "socket server: %v\n", err)
+			fmt.Fprintf(daemonLog, "socket server: %v\n", err)
 		}
 	}()
 
 	loop := daemon.New(
 		sched,
-		runner.ExecRunner{Stderr: os.Stderr},
+		runner.ExecRunner{Stderr: daemonLog},
 		srv.Bus,
 		srv.Snapshots,
 		clock.RealClock{},
-		os.Stderr,
+		daemonLog,
 		time.Duration(cfg.Global.CheckInterval)*time.Second,
 		srv.Refresh,
 	)
+	loop.Logs = logs
 	// loop.Tune has no reference to sampler/srv, so a successful global-scope
 	// tune still needs applyGlobalSideEffects run here explicitly, same as
 	// the SIGHUP path below does.
@@ -125,10 +136,11 @@ func runDaemon(configPath string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	go watchForReload(ctx, configPath, loop, sampler, srv)
+	go watchForReload(ctx, configPath, loop, sampler, srv, logs)
+	go watchForReopen(ctx, logs)
 	go sampler.Run(ctx)
 
-	fmt.Fprintf(os.Stderr, "lqg: listening on %s, %d app(s), check_interval=%ds\n",
+	fmt.Fprintf(daemonLog, "lqg: listening on %s, %d app(s), check_interval=%ds\n",
 		cfg.Global.SocketPath, len(cfg.Apps), cfg.Global.CheckInterval)
 	loop.Run(ctx)
 	return nil
@@ -144,7 +156,8 @@ func runDaemon(configPath string) error {
 // sampler's ceiling (ticket 16 Phase 3) via its own mutex-guarded
 // setter, so "% of ceiling" coloring stays correct post-reload without
 // the sampler reading Scheduler.Global from its own goroutine.
-func watchForReload(ctx context.Context, configPath string, loop *daemon.Loop, sampler *monitor.MetricSampler, srv *monitor.Server) {
+func watchForReload(ctx context.Context, configPath string, loop *daemon.Loop, sampler *monitor.MetricSampler, srv *monitor.Server, logs *logsink.Manager) {
+	out := logs.Daemon()
 	hup := make(chan os.Signal, 1)
 	signal.Notify(hup, syscall.SIGHUP)
 	defer signal.Stop(hup)
@@ -154,9 +167,17 @@ func watchForReload(ctx context.Context, configPath string, loop *daemon.Loop, s
 		case <-ctx.Done():
 			return
 		case <-hup:
-			cfg, err := loadAndValidate(configPath, os.Stderr, "SIGHUP warning")
+			cfg, err := loadAndValidate(configPath, out, "SIGHUP warning")
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "SIGHUP: %v (keeping previous config)\n", err)
+				fmt.Fprintf(out, "SIGHUP: %v (keeping previous config)\n", err)
+				continue
+			}
+			// Before the scheduler sees the new apps, so a newly added
+			// app's log file exists before its first decision is logged.
+			// A file that can't be opened rejects the whole reload, same
+			// as an invalid config.
+			if err := logs.Configure(logTargets(cfg)); err != nil {
+				fmt.Fprintf(out, "SIGHUP: %v (keeping previous config)\n", err)
 				continue
 			}
 
@@ -164,6 +185,38 @@ func watchForReload(ctx context.Context, configPath string, loop *daemon.Loop, s
 			applyGlobalSideEffects(cfg.Global, sampler, srv)
 		}
 	}
+}
+
+// watchForReopen reopens every log file on SIGUSR1 — logrotate's
+// postrotate hook (packaging/logrotate.conf) — so rotation needs neither
+// copytruncate nor a restart.
+func watchForReopen(ctx context.Context, logs *logsink.Manager) {
+	usr1 := make(chan os.Signal, 1)
+	signal.Notify(usr1, syscall.SIGUSR1)
+	defer signal.Stop(usr1)
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-usr1:
+			if err := logs.Reopen(); err != nil {
+				fmt.Fprintf(os.Stderr, "SIGUSR1: reopening log files: %v\n", err)
+				continue
+			}
+			fmt.Fprintf(logs.Daemon(), "log files reopened\n")
+		}
+	}
+}
+
+// logTargets resolves cfg's global.log_dir / apps[].log_file into the
+// files logsink should have open.
+func logTargets(cfg *config.Config) logsink.Targets {
+	files := make(map[string]string, len(cfg.Apps))
+	for _, a := range cfg.Apps {
+		files[a.Name] = a.LogFile
+	}
+	return logsink.Resolve(cfg.Global.LogDir, files)
 }
 
 // applyGlobalSideEffects refreshes the two pieces of state that mirror

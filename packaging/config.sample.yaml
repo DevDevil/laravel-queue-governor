@@ -16,6 +16,7 @@ global:
   max_concurrent_jobs: 2      # total simultaneous artisan processes
   log_level: info
   nice: 0                     # OS scheduling niceness for every worker (-20..19, 0 = untouched); per-app `nice` overrides this
+  # log_dir: /var/log/lqg     # optional: lqg.log + one <app>.log per app (incl. worker output); unset = everything to the journal
 
 apps:
   - name: wonen31
@@ -38,6 +39,7 @@ apps:
       enabled: true               # default false
       respect_load: false         # default false: skip on high load/iowait/full concurrency
       stagger: true               # default false: start at a per-app second within the minute instead of :00
+    # log_file: /var/log/lqg/wonen31.log   # optional: override <log_dir>/<name>.log (also works without log_dir)
 
   - name: squaremanager
     path: /var/www/squaremanager

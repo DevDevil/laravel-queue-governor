@@ -23,6 +23,14 @@ Group=lqg
 RuntimeDirectory=lqg
 RuntimeDirectoryMode=0750
 
+# For global.log_dir: /var/log/lqg is created root:lqg 0750 on start and
+# is writable despite ProtectSystem=strict below (LogsDirectory= adds it
+# to the writable paths automatically). Log files inside are root:lqg
+# 0640, readable by the lqg group. A log_dir/log_file elsewhere needs its
+# own ReadWritePaths= entry.
+LogsDirectory=lqg
+LogsDirectoryMode=0750
+
 ProtectSystem=strict
 ProtectHome=true
 

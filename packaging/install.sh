@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Installs lqg: creates the "lqg" group, installs the
-# binary + systemd unit + a sample config (only if one isn't already
+# binary + systemd unit + logrotate config + a sample config (only if one isn't already
 # present — never overwrites a real deployment's config). Must run as
 # root. /run/lqg itself is NOT created here — the unit's
 # RuntimeDirectory=lqg handles that on every start, correctly, since
@@ -61,6 +61,11 @@ fi
 
 install -o root -g root -m 0644 "$HERE/lqg.service" "$UNIT_DIR/lqg.service"
 echo "installed systemd unit: $UNIT_DIR/lqg.service"
+
+if [[ -d /etc/logrotate.d ]]; then
+  install -o root -g root -m 0644 "$HERE/logrotate.conf" /etc/logrotate.d/lqg
+  echo "installed logrotate config: /etc/logrotate.d/lqg (only used when global.log_dir is set)"
+fi
 
 systemctl daemon-reload
 

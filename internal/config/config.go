@@ -22,6 +22,13 @@ type GlobalConfig struct {
 	MaxConcurrentJobs int     `yaml:"max_concurrent_jobs"`
 	LogLevel          string  `yaml:"log_level"`
 
+	// LogDir, when set, moves logging to files (PLAN.md §8.1): the
+	// daemon's own log to <log_dir>/lqg.log and each app's log — its
+	// workers' stdout/stderr plus the daemon's decisions about it — to
+	// <log_dir>/<name>.log. Empty (the default) keeps everything on
+	// stderr (the systemd journal), as before.
+	LogDir string `yaml:"log_dir"`
+
 	// Nice is the OS scheduling niceness (-20 highest .. 19 lowest
 	// priority) every queue worker runs at unless an app sets its own
 	// (AppConfig.Nice). Zero (the Go/YAML default) means "don't touch
@@ -65,6 +72,10 @@ type AppConfig struct {
 	// (`artisan schedule:run`) once a minute (PLAN.md §6.1). The zero value
 	// (enabled: false) is exactly the pre-scheduler behaviour.
 	Scheduler SchedulerConfig `yaml:"scheduler"`
+
+	// LogFile overrides this app's log path (default <log_dir>/<name>.log).
+	// Also works without global.log_dir: then only this app gets a file.
+	LogFile string `yaml:"log_file"`
 
 	// ResolvedUID/ResolvedGID are populated by Validate, never by YAML —
 	// CLAUDE.md: "uid/gid come only from validated config," so the runner

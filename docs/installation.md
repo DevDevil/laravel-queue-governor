@@ -38,6 +38,9 @@ more:
   logging out and back in (or `newgrp lqg`); the script reminds you.
 - Installs the binary to `/usr/local/bin/lqg`.
 - Installs `packaging/lqg.service` to `/etc/systemd/system/lqg.service`.
+- Installs `packaging/logrotate.conf` to `/etc/logrotate.d/lqg` (only used
+  when you set `global.log_dir`, see
+  [configuration.md](configuration.md#log-files)).
 - Installs `packaging/config.sample.yaml` to `/etc/lqg/config.yaml` — **only
   if a config doesn't already exist there.** It never overwrites a real
   deployment's config, so re-running the install script to update the
@@ -79,6 +82,11 @@ sudo systemctl edit lqg
 [Service]
 ReadWritePaths=/run/lqg /var/www/wonen31/storage /var/www/squaremanager/storage
 ```
+
+`/var/log/lqg` doesn't need to be listed: the unit's `LogsDirectory=lqg`
+creates it (`root:lqg 0750`) and makes it writable, so `log_dir:
+/var/log/lqg` works out of the box. A `log_dir` or `log_file` anywhere else
+does need a `ReadWritePaths=` entry.
 
 If you skip this step, workers will start and *look* like they're running
 fine, but every write (a log line, a cached view, a session file) will fail
@@ -151,3 +159,7 @@ sudo systemctl reload lqg
 
 Same validation as `lqg validate` — an invalid file is logged and the
 previous, already-running config is kept untouched. Safe to try.
+
+With `global.log_dir` set, rotated log files are picked up with `SIGUSR1`
+(`sudo systemctl kill -s USR1 --kill-whom=main lqg` — `--kill-whom=main`, or the workers get it too) — the installed logrotate config does
+this for you.

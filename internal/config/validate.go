@@ -88,6 +88,10 @@ func Validate(cfg *Config) (warnings []string, err error) {
 		warnings = append(warnings, appWarnings...)
 	}
 
+	logErrs, logWarnings := validateLogging(cfg)
+	errs = append(errs, logErrs...)
+	warnings = append(warnings, logWarnings...)
+
 	if len(errs) > 0 {
 		return warnings, &ValidationError{Errors: errs}
 	}

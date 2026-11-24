@@ -3,6 +3,7 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -68,6 +69,10 @@ func (f *fakeRunner) Run(ctx context.Context, spec runner.RunSpec, hooks runner.
 		for _, e := range events {
 			hooks.OnJobEvent(e)
 		}
+	}
+	if hooks.Output != nil {
+		fmt.Fprintf(hooks.Output(pid, "stdout"), "worker says hi\n")
+		fmt.Fprintf(hooks.Output(pid, "stderr"), "worker warns\n")
 	}
 
 	if release != nil {

@@ -2,6 +2,7 @@ package runner
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -53,6 +54,16 @@ func (r ExecRunner) Run(ctx context.Context, spec RunSpec, hooks RunHooks) (RunR
 		return RunResult{ExitCode: -1}, fmt.Errorf("stdout pipe for %s in %s: %w", spec.PHPBinary, spec.Dir, err)
 	}
 
+	// stderr is only piped when someone wants it (hooks.Output, i.e. a
+	// per-app log file); otherwise it stays nil = /dev/null, as before.
+	var stderr io.ReadCloser
+	if hooks.Output != nil {
+		stderr, err = cmd.StderrPipe()
+		if err != nil {
+			return RunResult{ExitCode: -1}, fmt.Errorf("stderr pipe for %s in %s: %w", spec.PHPBinary, spec.Dir, err)
+		}
+	}
+
 	start := time.Now()
 	if err := cmd.Start(); err != nil {
 		return RunResult{ExitCode: -1, Duration: time.Since(start)}, fmt.Errorf("starting %s in %s: %w", spec.PHPBinary, spec.Dir, err)
@@ -78,7 +89,7 @@ func (r ExecRunner) Run(ctx context.Context, spec RunSpec, hooks RunHooks) (RunR
 		fmt.Fprintf(r.Stderr, "warning: setting nice=%d for %s (pid %d): %v\n", spec.Nice, spec.Dir, cmd.Process.Pid, err)
 	}
 
-	// Drain stdout on its own goroutine, concurrently with the child
+	// Drain stdout (and stderr, when piped) on its own goroutine, concurrently with the child
 	// running, so a chatty --json batch run can't fill the pipe buffer
 	// and stall the child on a blocked write. Waited for below before
 	// calling cmd.Wait() in the normal case — needed to reliably capture
@@ -97,17 +108,33 @@ func (r ExecRunner) Run(ctx context.Context, spec RunSpec, hooks RunHooks) (RunR
 	// to keep running in the background (same tolerance this package
 	// already has for the results/starts channels outliving Run in
 	// daemon.Loop) rather than blocking shutdown on it.
+	var stdoutLog, stderrLog io.Writer
+	if hooks.Output != nil {
+		stdoutLog = hooks.Output(cmd.Process.Pid, "stdout")
+		stderrLog = hooks.Output(cmd.Process.Pid, "stderr")
+	}
 	stdoutDone := make(chan struct{})
 	go func() {
 		defer close(stdoutDone)
-		scanner := bufio.NewScanner(stdout)
-		for scanner.Scan() {
+		var stderrDone chan struct{}
+		if stderr != nil {
+			stderrDone = make(chan struct{})
+			go func() {
+				defer close(stderrDone)
+				drainLines(stderr, func(line []byte) { writeLine(stderrLog, line) })
+			}()
+		}
+		drainLines(stdout, func(line []byte) {
+			writeLine(stdoutLog, line)
 			if hooks.OnJobEvent == nil {
-				continue
+				return
 			}
-			if e, ok := parseJobEvent(scanner.Bytes()); ok {
+			if e, ok := parseJobEvent(line); ok {
 				hooks.OnJobEvent(e)
 			}
+		})
+		if stderrDone != nil {
+			<-stderrDone
 		}
 	}()
 	// Note this select can also resolve via ctx.Done() on a plain
@@ -139,4 +166,36 @@ func (r ExecRunner) Run(ctx context.Context, spec RunSpec, hooks RunHooks) (RunR
 		// canceled, ...) — this is a real runner failure.
 		return RunResult{ExitCode: -1, Duration: duration}, fmt.Errorf("running %s in %s: %w", spec.PHPBinary, spec.Dir, err)
 	}
+}
+
+// maxLineChunk bounds one emitted line: a longer line is emitted in
+// chunks rather than buffered without limit — and, unlike
+// bufio.Scanner's ErrTooLong, never stops draining, which would leave the
+// child blocked on a full pipe.
+const maxLineChunk = 64 * 1024
+
+// drainLines reads r to EOF (or a read error), calling fn with each line
+// minus its trailing newline. A final unterminated line is still emitted.
+func drainLines(r io.Reader, fn func([]byte)) {
+	br := bufio.NewReaderSize(r, maxLineChunk)
+	for {
+		line, err := br.ReadSlice('\n')
+		if len(line) > 0 {
+			fn(bytes.TrimSuffix(line, []byte("\n")))
+		}
+		if err != nil && err != bufio.ErrBufferFull {
+			return
+		}
+	}
+}
+
+// writeLine writes line plus a newline to w as a single Write; nil w is a
+// no-op.
+func writeLine(w io.Writer, line []byte) {
+	if w == nil {
+		return
+	}
+	buf := make([]byte, 0, len(line)+1)
+	buf = append(buf, line...)
+	w.Write(append(buf, '\n'))
 }
