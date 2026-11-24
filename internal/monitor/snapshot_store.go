@@ -74,3 +74,23 @@ func (s *SnapshotStore) PatchAppConfig(apps []config.AppConfig) {
 		st.Nice = a.Nice
 	}
 }
+
+// PatchSchedule replaces one app's schedule:run status in place, so a
+// schedule start/skip/completion shows up in `status` immediately rather
+// than at the next queue tick. Unknown names are skipped (the app appears
+// with its schedule status on the next real tick).
+func (s *SnapshotStore) PatchSchedule(name string, st *ipc.ScheduleStatus) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range s.current.Apps {
+		if s.current.Apps[i].Name == name {
+			// Copy-on-write: a snapshot handed out by Current() shares
+			// this backing array and may be being encoded right now.
+			apps := make([]ipc.AppStatus, len(s.current.Apps))
+			copy(apps, s.current.Apps)
+			apps[i].Schedule = st
+			s.current.Apps = apps
+			return
+		}
+	}
+}

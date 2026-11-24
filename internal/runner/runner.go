@@ -7,6 +7,7 @@ package runner
 
 import (
 	"context"
+	"io"
 	"time"
 )
 
@@ -51,6 +52,14 @@ type RunHooks struct {
 	// called at all for an app that isn't configured with json_output,
 	// since its stdout won't parse as a JobEvent.
 	OnJobEvent func(JobEvent)
+
+	// Output, if set, is called once right after the child starts, for
+	// each of its two streams ("stdout", "stderr"), and every line the
+	// child prints on that stream is written to the returned writer
+	// (one Write per line, newline included) — the per-app log file
+	// (PLAN.md §8.1). Nil keeps the old behaviour: stdout is only parsed
+	// for --json events, stderr goes to /dev/null.
+	Output func(pid int, stream string) io.Writer
 }
 
 // Runner is implemented by the real setuid-exec runner in production and by

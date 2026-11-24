@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net"
 
 	"github.com/DevDevil/laravel-queue-governor/internal/ipc"
 )
@@ -31,9 +30,9 @@ type dashboardFrame struct {
 // silently skipped rather than erroring, so an older client degrades
 // gracefully instead of dying on an unknown "type".
 func StreamDashboard(ctx context.Context, socketPath string, handle func(dashboardFrame) error) error {
-	conn, err := net.DialTimeout("unix", socketPath, dialTimeout)
+	conn, err := dialDaemon(socketPath)
 	if err != nil {
-		return fmt.Errorf("connecting to %s: %w", socketPath, err)
+		return err
 	}
 	defer conn.Close()
 

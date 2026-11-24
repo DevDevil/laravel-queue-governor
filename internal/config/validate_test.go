@@ -283,6 +283,24 @@ func TestValidate_WarnRules(t *testing.T) {
 	}
 }
 
+func TestValidate_SchedulerOptionsWithoutEnabledWarn(t *testing.T) {
+	cfg := validAppFixture(t)
+	cfg.Apps[0].Scheduler = SchedulerConfig{Stagger: true}
+
+	warnings, err := Validate(cfg)
+	if err != nil {
+		t.Fatalf("Validate: unexpected error: %v", err)
+	}
+	if !containsAny(warnings, "scheduler.enabled is false") {
+		t.Errorf("warnings = %v, want scheduler-not-enabled warning", warnings)
+	}
+
+	cfg.Apps[0].Scheduler.Enabled = true
+	if warnings, _ := Validate(cfg); len(warnings) != 0 {
+		t.Errorf("enabled scheduler: warnings = %v, want none", warnings)
+	}
+}
+
 func containsAny(haystack []string, substr string) bool {
 	for _, s := range haystack {
 		if strings.Contains(s, substr) {

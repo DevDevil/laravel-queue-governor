@@ -61,6 +61,32 @@ func formatLogEntry(d ipc.DecisionEvent, row dashboardAppRow, hello ipc.HelloFra
 	return e
 }
 
+// formatScheduleLogEntry builds a log entry for a schedule:run decision
+// event (PLAN.md §6.1): the verb is prefixed with "schedule:run" so it
+// can't be mistaken for a queue-worker line (App stays the bare app name,
+// so focus mode's per-app log filter still matches it); the exit code and
+// duration are the detail for a completed run.
+func formatScheduleLogEntry(d ipc.DecisionEvent) dashboardLogEntry {
+	e := dashboardLogEntry{Time: d.Timestamp, App: d.App, Verb: "schedule:run " + d.Decision}
+	switch d.Decision {
+	case "skipped":
+		if d.Reason != nil {
+			e.Reason = *d.Reason
+		}
+		e.Detail = e.Reason
+	case "completed":
+		if st := d.Schedule; st != nil && st.LastExitCode != nil {
+			e.Detail = fmt.Sprintf("exit %d  %s", *st.LastExitCode, formatMillis(st.LastDurationMs))
+			if *st.LastExitCode != 0 {
+				e.Reason = "schedule_failed" // colours the verb as a warning
+			}
+		}
+	default:
+		e.Detail = fmt.Sprintf("load %.1f io %.0f%%", d.Load, d.IOWait)
+	}
+	return e
+}
+
 // formatActiveRunJobs summarizes whichever of this app's currently
 // in-flight runs have a known job (json_output apps only, once the
 // runner has parsed a --json event for them) as "Job · status" pairs,
@@ -102,6 +128,8 @@ func dashLogReasonColor(reason string) lipgloss.Color {
 		return colStateThrottled
 	case "spike_cooldown":
 		return colStateCooldown
+	case "schedule_overlap", "schedule_failed":
+		return colStateThrottled
 	default:
 		return colStateIdle
 	}
@@ -147,7 +175,7 @@ func renderLogLine(e dashboardLogEntry) string {
 	app := lipgloss.NewStyle().Foreground(colTextPrimary).Render(e.App)
 
 	verbColor := colStateRunning
-	if e.Verb == "skipped" {
+	if e.Verb == "skipped" || e.Reason != "" {
 		verbColor = dashLogReasonColor(e.Reason)
 	}
 	verb := lipgloss.NewStyle().Foreground(verbColor).Render(e.Verb)

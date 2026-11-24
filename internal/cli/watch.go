@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net"
 
 	"github.com/DevDevil/laravel-queue-governor/internal/ipc"
 )
@@ -27,9 +26,9 @@ const (
 // connect/scan/cancel shape, the way StreamWatch (ipc.DecisionEvent)
 // already does.
 func streamNDJSON[T any](ctx context.Context, socketPath, cmd string, handle func(T) error) error {
-	conn, err := net.DialTimeout("unix", socketPath, dialTimeout)
+	conn, err := dialDaemon(socketPath)
 	if err != nil {
-		return fmt.Errorf("connecting to %s: %w", socketPath, err)
+		return err
 	}
 	defer conn.Close()
 

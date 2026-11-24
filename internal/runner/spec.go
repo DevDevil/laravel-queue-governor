@@ -30,6 +30,21 @@ func BuildSpec(global config.GlobalConfig, app config.AppConfig) RunSpec {
 		args = append(args, "--json")
 	}
 
+	return appSpec(global, app, args)
+}
+
+// BuildScheduleSpec builds the argv for one run of an app's Laravel
+// scheduler (PLAN.md §6.1): `<php_binary> artisan schedule:run`, as the
+// app's user, at the app's effective nice — the same exec path and
+// privilege drop as queue:work, built only from validated config.
+func BuildScheduleSpec(global config.GlobalConfig, app config.AppConfig) RunSpec {
+	return appSpec(global, app, []string{"artisan", "schedule:run"})
+}
+
+// appSpec fills in everything a RunSpec needs besides args — shared by
+// BuildSpec and BuildScheduleSpec so the uid/gid/nice resolution exists
+// in one place.
+func appSpec(global config.GlobalConfig, app config.AppConfig, args []string) RunSpec {
 	nice := global.Nice
 	if app.Nice != nil {
 		nice = *app.Nice

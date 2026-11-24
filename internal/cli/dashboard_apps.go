@@ -40,6 +40,10 @@ type dashboardAppRow struct {
 	SpikeCooldown int
 	Priority      int
 	Nice          *int
+
+	// Schedule is this app's schedule:run status (PLAN.md §6.1), nil
+	// unless scheduler.enabled — rendered as one extra sub-item line.
+	Schedule *ipc.ScheduleStatus
 }
 
 // dashStateRank orders TUI.md §9.2's "state (running first)" sort.
@@ -236,6 +240,9 @@ func appsTableLineCount(rows []dashboardAppRow) int {
 	n := 1 // header
 	for _, r := range rows {
 		n += 1 + len(r.ActiveRuns)
+		if r.Schedule != nil {
+			n++
+		}
 	}
 	return n
 }
@@ -256,6 +263,10 @@ func renderAppsTable(rows []dashboardAppRow, width int, hello ipc.HelloFrame, hi
 		for _, run := range r.ActiveRuns {
 			b.WriteString("\n")
 			b.WriteString(renderAppsSubItemLine(run, width, now, highlighted))
+		}
+		if r.Schedule != nil {
+			b.WriteString("\n")
+			b.WriteString(renderScheduleSubItemLine(r.Schedule, width, now, highlighted))
 		}
 	}
 	return b.String()
@@ -291,6 +302,56 @@ func renderAppsSubItemLine(run ipc.ActiveRun, width int, now time.Time, highligh
 		base = base.Background(colRowHighlight)
 	}
 	return base.Render(padCell(text, width, false))
+}
+
+// renderScheduleSubItemLine renders an app's schedule:run status as a
+// sub-item line under its row (PLAN.md §6.1), styled like the per-job
+// sub-items: "schedule:run running 12s" while in flight, otherwise the
+// last run's exit code and duration plus when the next run is due.
+func renderScheduleSubItemLine(st *ipc.ScheduleStatus, width int, now time.Time, highlighted bool) string {
+	text := dashSubItemPrefix + FormatScheduleSummary(st, now)
+	base := lipgloss.NewStyle().Foreground(colTextSecond)
+	if highlighted {
+		base = base.Background(colRowHighlight)
+	}
+	return base.Render(padCell(text, width, false))
+}
+
+// FormatScheduleSummary is a one-line, human-readable schedule:run status
+// shared by the dashboard sub-item and `lqg status`.
+func FormatScheduleSummary(st *ipc.ScheduleStatus, now time.Time) string {
+	if st == nil {
+		return "-"
+	}
+	var parts []string
+	switch {
+	case st.Running && st.LastStart != nil:
+		parts = append(parts, "schedule:run running "+formatElapsed(now.Sub(*st.LastStart)))
+	case st.LastExitCode != nil:
+		parts = append(parts, fmt.Sprintf("schedule:run exit %d (%s)", *st.LastExitCode, formatMillis(st.LastDurationMs)))
+	default:
+		parts = append(parts, "schedule:run not run yet")
+	}
+	if st.LastSkipReason != nil && st.LastSkipAt != nil && (st.LastStart == nil || st.LastSkipAt.After(*st.LastStart)) {
+		parts = append(parts, "skipped "+*st.LastSkipReason)
+	}
+	if st.NextDue != nil {
+		parts = append(parts, "next "+formatElapsed(st.NextDue.Sub(now)))
+	}
+	return strings.Join(parts, "  ")
+}
+
+// formatMillis renders a run duration: "850ms" under a second, else
+// seconds with one decimal ("1.2s"), then formatElapsed beyond a minute.
+func formatMillis(ms int64) string {
+	switch {
+	case ms < 1000:
+		return fmt.Sprintf("%dms", ms)
+	case ms < 60000:
+		return fmt.Sprintf("%.1fs", float64(ms)/1000)
+	default:
+		return formatElapsed(time.Duration(ms) * time.Millisecond)
+	}
 }
 
 // formatElapsed renders a duration compactly for the apps table's

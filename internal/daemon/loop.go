@@ -9,8 +9,11 @@ import (
 	"io"
 	"time"
 
+	"github.com/DevDevil/laravel-queue-governor/internal/appstate"
 	"github.com/DevDevil/laravel-queue-governor/internal/clock"
 	"github.com/DevDevil/laravel-queue-governor/internal/config"
+	"github.com/DevDevil/laravel-queue-governor/internal/ipc"
+	"github.com/DevDevil/laravel-queue-governor/internal/logsink"
 	"github.com/DevDevil/laravel-queue-governor/internal/monitor"
 	"github.com/DevDevil/laravel-queue-governor/internal/runner"
 	"github.com/DevDevil/laravel-queue-governor/internal/scheduler"
@@ -57,6 +60,18 @@ type runJobEvent struct {
 	event runner.JobEvent
 }
 
+// scheduleResult is what a schedule:run (PLAN.md §6.1) reports back once
+// it finishes. state is the exact ScheduleState the run was started
+// against: if a reload disabled the scheduler for this app in the
+// meantime (app.Schedule now nil or a fresh state), the result is
+// dropped instead of being attributed to state it doesn't belong to.
+type scheduleResult struct {
+	app    *scheduler.App
+	state  *appstate.ScheduleState
+	result runner.RunResult
+	err    error
+}
+
 // reloadRequest is a validated config waiting to be applied by Run's own
 // goroutine.
 type reloadRequest struct {
@@ -96,9 +111,20 @@ type Loop struct {
 	// may leave it nil.
 	Refresh *monitor.RefreshBus
 
+	// Logs routes per-app and daemon log lines to files (PLAN.md §8.1).
+	// nil = no log files: everything stays on Stderr as before. When set,
+	// Stderr should be Logs.Daemon().
+	Logs *logsink.Manager
+
 	spikeSeen map[*scheduler.App]bool
-	reload    chan reloadRequest
-	snapshot  chan snapshotRequest
+	// lastSkip is the last skip reason written to each app's log, so a
+	// skip is only logged when the reason changes (logDecisions).
+	lastSkip map[*scheduler.App]appstate.Reason
+	// globalGate is what the global gate was holding apps back on at the
+	// last tick: "load", "iowait" or "" (logGlobalGate).
+	globalGate string
+	reload     chan reloadRequest
+	snapshot   chan snapshotRequest
 }
 
 func New(sched *scheduler.Scheduler, run runner.Runner, bus *monitor.Bus, snapshots *monitor.SnapshotStore, clk clock.Clock, stderr io.Writer, checkInterval time.Duration, refresh *monitor.RefreshBus) *Loop {
@@ -112,6 +138,7 @@ func New(sched *scheduler.Scheduler, run runner.Runner, bus *monitor.Bus, snapsh
 		CheckInterval: checkInterval,
 		Refresh:       refresh,
 		spikeSeen:     make(map[*scheduler.App]bool),
+		lastSkip:      make(map[*scheduler.App]appstate.Reason),
 		reload:        make(chan reloadRequest, 1),
 		snapshot:      make(chan snapshotRequest),
 	}
@@ -178,7 +205,14 @@ func (l *Loop) Run(ctx context.Context) {
 	// stall waiting for the main loop to drain it mid-tick.
 	jobEvents := make(chan runJobEvent, notifyChanCap*jobEventsCapMultiplier)
 
+	scheduleResults := make(chan scheduleResult, notifyChanCap)
+
 	timer := l.Clock.After(l.CheckInterval)
+	// scheduleTimer fires when the next app's schedule:run minute comes
+	// due (PLAN.md §6.1) — nil (blocks forever in select) when no app has
+	// the scheduler enabled, so a config without it behaves exactly as
+	// before. Re-armed after every schedule tick and every reload.
+	scheduleTimer := l.scheduleTimer()
 	for {
 		select {
 		case <-ctx.Done():
@@ -186,6 +220,11 @@ func (l *Loop) Run(ctx context.Context) {
 		case <-timer:
 			l.tick(ctx, results, starts, jobEvents)
 			timer = l.Clock.After(l.CheckInterval)
+		case <-scheduleTimer:
+			l.scheduleTick(ctx, scheduleResults)
+			scheduleTimer = l.scheduleTimer()
+		case r := <-scheduleResults:
+			l.completeSchedule(r)
 		case rs := <-starts:
 			rs.app.Machine.RecordRunStarted(rs.pid, rs.start)
 		case je := <-jobEvents:
@@ -194,6 +233,7 @@ func (l *Loop) Run(ctx context.Context) {
 			l.complete(r)
 		case req := <-l.reload:
 			l.applyReload(req)
+			scheduleTimer = l.scheduleTimer()
 		case req := <-l.snapshot:
 			req.resp <- l.effectiveConfig()
 		}
@@ -212,6 +252,7 @@ const jobEventsCapMultiplier = 8
 
 func (l *Loop) applyReload(req reloadRequest) {
 	l.Scheduler.Reload(req.global, req.apps)
+	l.forgetRemovedApps()
 	// Refreshes the config-derived fields of the already-known apps in
 	// the snapshot store immediately, rather than waiting up to
 	// check_interval seconds for the next tick to do it — see
@@ -242,6 +283,8 @@ func (l *Loop) tick(ctx context.Context, results chan<- runResult, starts chan<-
 
 	l.Bus.Publish(monitor.Events(now, decisions, l.Scheduler.Apps))
 	l.Snapshots.Update(monitor.Snapshot(now, decisions, l.Scheduler.Apps))
+	l.logGlobalGate(decisions)
+	l.logDecisions(decisions)
 
 	for i, d := range decisions {
 		app := l.Scheduler.Apps[i]
@@ -263,6 +306,7 @@ func (l *Loop) tick(ctx context.Context, results chan<- runResult, starts chan<-
 
 func (l *Loop) startRun(ctx context.Context, app *scheduler.App, results chan<- runResult, starts chan<- runStart, jobEvents chan<- runJobEvent) {
 	spec := runner.BuildSpec(l.Scheduler.Global, app.Config)
+	output := l.workerOutput(app, "queue:work")
 	go func() {
 		var pid int
 		var started bool
@@ -275,6 +319,7 @@ func (l *Loop) startRun(ctx context.Context, app *scheduler.App, results chan<- 
 			OnJobEvent: func(e runner.JobEvent) {
 				jobEvents <- runJobEvent{app: app, pid: pid, event: e}
 			},
+			Output: output,
 		})
 		results <- runResult{app: app, result: result, err: err, started: started}
 	}()
@@ -284,7 +329,9 @@ func (l *Loop) complete(r runResult) {
 	now := l.Clock.Now()
 
 	if r.err != nil {
-		fmt.Fprintf(l.Stderr, "run failed for %s: %v\n", r.app.Config.Name, r.err)
+		l.appLogf(r.app, true, "run failed for %s: %v", r.app.Config.Name, r.err)
+	} else {
+		l.logRunComplete(r.app, r.result)
 	}
 
 	// A failed-to-start run (r.err != nil) is treated as "no work done" —
@@ -301,4 +348,86 @@ func (l *Loop) complete(r runResult) {
 	}
 
 	r.app.Machine.OnRunComplete(now, didWork, spike, r.started)
+}
+
+// scheduleTimer arms a timer for the earliest due schedule:run across all
+// apps, or returns nil if no app has the scheduler enabled.
+func (l *Loop) scheduleTimer() <-chan time.Time {
+	now := l.Clock.Now()
+	due, ok := l.Scheduler.NextScheduleDue(now)
+	if !ok {
+		return nil
+	}
+	d := due.Sub(now)
+	if d < 0 {
+		d = 0
+	}
+	return l.Clock.After(d)
+}
+
+// scheduleTick resolves every app whose schedule:run minute is due
+// (Scheduler.ScheduleTick), publishes a schedule decision event for each,
+// and starts the runs it decided on.
+func (l *Loop) scheduleTick(ctx context.Context, results chan<- scheduleResult) {
+	now := l.Clock.Now()
+	decisions := l.Scheduler.ScheduleTick(now)
+	if len(decisions) == 0 {
+		return
+	}
+
+	events := monitor.ScheduleEvents(now, decisions)
+	l.Bus.Publish(events)
+	for i, d := range decisions {
+		l.Snapshots.PatchSchedule(d.App.Config.Name, events[i].Schedule)
+		l.logSchedule(d)
+		if !d.Run {
+			continue
+		}
+		l.startSchedule(ctx, d.App, results)
+	}
+}
+
+func (l *Loop) startSchedule(ctx context.Context, app *scheduler.App, results chan<- scheduleResult) {
+	spec := runner.BuildScheduleSpec(l.Scheduler.Global, app.Config)
+	state := app.Schedule
+	output := l.workerOutput(app, "schedule:run")
+	go func() {
+		result, err := l.Runner.Run(ctx, spec, runner.RunHooks{Output: output})
+		results <- scheduleResult{app: app, state: state, result: result, err: err}
+	}()
+}
+
+func (l *Loop) completeSchedule(r scheduleResult) {
+	name := r.app.Config.Name
+	switch {
+	case r.err != nil:
+		l.appLogf(r.app, true, "schedule:run failed for %s: %v", name, r.err)
+	case r.result.ExitCode != 0:
+		l.appLogf(r.app, false, "schedule:run for %s exited %d after %s", name, r.result.ExitCode, r.result.Duration.Round(time.Millisecond))
+	default:
+		l.appOnlyf(r.app, "schedule:run finished: exit 0 after %s", r.result.Duration.Round(time.Millisecond))
+	}
+
+	if r.app.Schedule != r.state {
+		return // scheduler disabled (or reset) for this app since the run started
+	}
+	r.state.OnComplete(r.result.ExitCode, r.result.Duration)
+	now := l.Clock.Now()
+	ev := monitor.ScheduleCompletedEvent(now, r.app)
+	l.Bus.Publish([]ipc.DecisionEvent{ev})
+	l.Snapshots.PatchSchedule(name, ev.Schedule)
+}
+
+// forgetRemovedApps drops per-app log bookkeeping for apps a reload
+// removed, so their *scheduler.App pointers aren't kept alive forever.
+func (l *Loop) forgetRemovedApps() {
+	current := make(map[*scheduler.App]bool, len(l.Scheduler.Apps))
+	for _, a := range l.Scheduler.Apps {
+		current[a] = true
+	}
+	for a := range l.lastSkip {
+		if !current[a] {
+			delete(l.lastSkip, a)
+		}
+	}
 }

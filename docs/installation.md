@@ -33,8 +33,14 @@ sudo ./packaging/install.sh ./lqg
 more:
 
 - Creates the `lqg` system group, if it doesn't already exist.
+- Adds the user who ran `sudo ./install.sh` (`$SUDO_USER`) to the `lqg`
+  group, so they can use `lqg status`/`lqg watch` without `sudo` — after
+  logging out and back in (or `newgrp lqg`); the script reminds you.
 - Installs the binary to `/usr/local/bin/lqg`.
 - Installs `packaging/lqg.service` to `/etc/systemd/system/lqg.service`.
+- Installs `packaging/logrotate.conf` to `/etc/logrotate.d/lqg` (only used
+  when you set `global.log_dir`, see
+  [configuration.md](configuration.md#log-files)).
 - Installs `packaging/config.sample.yaml` to `/etc/lqg/config.yaml` — **only
   if a config doesn't already exist there.** It never overwrites a real
   deployment's config, so re-running the install script to update the
@@ -77,6 +83,11 @@ sudo systemctl edit lqg
 ReadWritePaths=/run/lqg /var/www/wonen31/storage /var/www/squaremanager/storage
 ```
 
+`/var/log/lqg` doesn't need to be listed: the unit's `LogsDirectory=lqg`
+creates it (`root:lqg 0750`) and makes it writable, so `log_dir:
+/var/log/lqg` works out of the box. A `log_dir` or `log_file` anywhere else
+does need a `ReadWritePaths=` entry.
+
 If you skip this step, workers will start and *look* like they're running
 fine, but every write (a log line, a cached view, a session file) will fail
 silently from the app's point of view — a classic "works until it doesn't"
@@ -107,6 +118,12 @@ The daemon's control socket (`/run/lqg/lqg.sock` by default) is owned
 sudo usermod -aG lqg "$USER"
 # log out and back in for the new group membership to take effect
 ```
+
+`install.sh` already does this for the user who ran it. If you lack access,
+`lqg status`/`lqg watch` say so explicitly — including whether you're not in
+the group at all, or were added but your current login session predates it —
+instead of a bare `permission denied` (or, for `watch`, a dashboard stuck on
+"disconnected"). The same goes for a daemon that isn't running.
 
 ## Upgrading / redeploying
 
@@ -142,3 +159,7 @@ sudo systemctl reload lqg
 
 Same validation as `lqg validate` — an invalid file is logged and the
 previous, already-running config is kept untouched. Safe to try.
+
+With `global.log_dir` set, rotated log files are picked up with `SIGUSR1`
+(`sudo systemctl kill -s USR1 --kill-whom=main lqg` — `--kill-whom=main`, or the workers get it too) — the installed logrotate config does
+this for you.

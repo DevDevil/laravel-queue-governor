@@ -7,6 +7,7 @@
 package scheduler
 
 import (
+	"hash/fnv"
 	"sort"
 	"time"
 
@@ -32,6 +33,39 @@ const (
 type App struct {
 	Config  config.AppConfig
 	Machine *appstate.Machine
+
+	// Schedule is this app's schedule:run state (PLAN.md §6.1) — nil
+	// unless config.SchedulerConfig.Enabled.
+	Schedule *appstate.ScheduleState
+}
+
+// ScheduleOffset is where within each minute an app's schedule:run
+// starts: 0 without stagger, otherwise a stable whole-second offset in
+// [0, 60) derived from the app name (FNV-1a), so the same app always
+// lands on the same second across restarts and reloads.
+func ScheduleOffset(cfg config.AppConfig) time.Duration {
+	if !cfg.Scheduler.Stagger {
+		return 0
+	}
+	h := fnv.New32a()
+	h.Write([]byte(cfg.Name))
+	return time.Duration(h.Sum32()%60) * time.Second
+}
+
+// syncSchedule creates, updates, or drops a.Schedule to match a.Config.
+// Disabling drops the state; a run already in flight still reports back
+// via its own *App pointer and is simply ignored on completion.
+func (a *App) syncSchedule() {
+	if !a.Config.Scheduler.Enabled {
+		a.Schedule = nil
+		return
+	}
+	offset := ScheduleOffset(a.Config)
+	if a.Schedule == nil {
+		a.Schedule = appstate.NewScheduleState(offset)
+		return
+	}
+	a.Schedule.SetOffset(offset)
 }
 
 // Decision is this app's final outcome for one tick — a self-contained
@@ -57,12 +91,28 @@ type Decision struct {
 	Spike bool
 }
 
+// ScheduleDecision is the outcome for one app whose schedule:run minute
+// came due (PLAN.md §6.1): started (Run) or skipped with a Reason.
+type ScheduleDecision struct {
+	App    *App
+	Run    bool
+	Reason appstate.Reason // empty when Run
+	Load   float64
+	IOWait float64
+}
+
 // Scheduler holds one App per configured app plus the shared metrics
 // source polled once per tick.
 type Scheduler struct {
 	Global config.GlobalConfig
 	Apps   []*App
 	Source metrics.Source
+
+	// lastMetrics is the most recent sample taken by Tick. ScheduleTick
+	// reuses it instead of sampling again: metrics.ProcSource's iowait is
+	// a delta between consecutive calls, so an extra Sample() from the
+	// schedule path would corrupt the queue tick's own iowait reading.
+	lastMetrics metrics.Metrics
 }
 
 // New builds a Scheduler with one appstate.Machine per app, seeded from
@@ -79,6 +129,7 @@ func New(global config.GlobalConfig, apps []config.AppConfig, source metrics.Sou
 				a.JSONOutput,
 			),
 		}
+		as[i].syncSchedule()
 	}
 	return &Scheduler{Global: global, Apps: as, Source: source}
 }
@@ -118,6 +169,7 @@ func (s *Scheduler) Reload(global config.GlobalConfig, apps []config.AppConfig) 
 				Machine: appstate.New(cfg.MaxConcurrent, minInterval, spikeCooldown, cfg.JSONOutput),
 			}
 		}
+		next[i].syncSchedule()
 	}
 
 	s.Global = global
@@ -145,6 +197,12 @@ func (s *Scheduler) globalGate(m metrics.Metrics) globalGate {
 	totalRunning := 0
 	for _, a := range s.Apps {
 		totalRunning += a.Machine.RunningCount()
+		// An in-flight schedule:run is a real artisan process too — it
+		// counts towards max_concurrent_jobs so queue dispatch backs off
+		// while it runs (PLAN.md §6.1).
+		if a.Schedule != nil && a.Schedule.Running() {
+			totalRunning++
+		}
 	}
 	return globalGate{
 		loadHigh:        m.Load1 > s.Global.MaxSystemLoad,
@@ -242,6 +300,7 @@ func (s *Scheduler) Tick(now time.Time) ([]Decision, error) {
 	if err != nil {
 		return nil, err
 	}
+	s.lastMetrics = m
 
 	gate := s.globalGate(m)
 
@@ -262,4 +321,67 @@ func (s *Scheduler) Tick(now time.Time) ([]Decision, error) {
 	s.dispatchFairly(now, decisions, candidates, gate.totalRunning)
 
 	return decisions, nil
+}
+
+// NextScheduleDue is the earliest due time across every app with
+// schedule:run enabled; ok is false if none has it enabled.
+func (s *Scheduler) NextScheduleDue(now time.Time) (due time.Time, ok bool) {
+	for _, a := range s.Apps {
+		if a.Schedule == nil {
+			continue
+		}
+		d := a.Schedule.NextDue(now)
+		if !ok || d.Before(due) {
+			due, ok = d, true
+		}
+	}
+	return due, ok
+}
+
+// ScheduleTick resolves every app whose schedule:run minute is due at now
+// (PLAN.md §6.1): skipped with schedule_overlap if its previous run is
+// still in flight; with respect_load, skipped by the same own-then-global
+// load/iowait/concurrency precedence as queue workers (§5); otherwise
+// started. Started apps are marked running here (OnStart) — the caller
+// execs the process and reports back via ScheduleState.OnComplete. Uses
+// the metrics from the most recent Tick rather than sampling again (see
+// Scheduler.lastMetrics). Apps not due produce no decision.
+func (s *Scheduler) ScheduleTick(now time.Time) []ScheduleDecision {
+	m := s.lastMetrics
+	gate := s.globalGate(m)
+
+	var out []ScheduleDecision
+	for _, a := range s.Apps {
+		if a.Schedule == nil || !a.Schedule.Due(now) {
+			continue
+		}
+		d := ScheduleDecision{App: a, Load: m.Load1, IOWait: m.IOWaitPct}
+
+		switch {
+		case a.Schedule.Running():
+			d.Reason = appstate.ReasonScheduleOverlap
+		case !a.Config.Scheduler.RespectLoad:
+		case m.Load1 > a.Config.MaxLoad:
+			d.Reason = appstate.ReasonAppLoadHigh
+		case m.IOWaitPct > float64(a.Config.MaxIOWait):
+			d.Reason = appstate.ReasonAppIOWaitHigh
+		case gate.loadHigh:
+			d.Reason = ReasonGlobalLoadHigh
+		case gate.iowaitHigh:
+			d.Reason = ReasonGlobalIOWaitHigh
+		case gate.concurrencyFull:
+			d.Reason = ReasonGlobalConcurrency
+		}
+
+		if d.Reason != appstate.ReasonNone {
+			a.Schedule.OnSkip(now, d.Reason)
+		} else {
+			d.Run = true
+			a.Schedule.OnStart(now)
+			gate.totalRunning++
+			gate.concurrencyFull = gate.totalRunning >= s.Global.MaxConcurrentJobs
+		}
+		out = append(out, d)
+	}
+	return out
 }

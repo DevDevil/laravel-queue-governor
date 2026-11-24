@@ -2,10 +2,12 @@ package runner
 
 import (
 	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -261,5 +263,66 @@ func TestExecRunner_ContextCancellation(t *testing.T) {
 	}
 	if result.Duration >= 5*time.Second {
 		t.Errorf("Duration = %v, want well under the 5s sleep (should have been killed)", result.Duration)
+	}
+}
+
+type lineSink struct {
+	mu    sync.Mutex
+	lines map[string][]string // stream -> lines
+}
+
+func (s *lineSink) writer(stream string) io.Writer {
+	return writerFunc(func(p []byte) (int, error) {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if s.lines == nil {
+			s.lines = map[string][]string{}
+		}
+		s.lines[stream] = append(s.lines[stream], string(p))
+		return len(p), nil
+	})
+}
+
+type writerFunc func([]byte) (int, error)
+
+func (f writerFunc) Write(p []byte) (int, error) { return f(p) }
+
+func TestExecRunner_OutputReceivesStdoutAndStderrLines(t *testing.T) {
+	dir := t.TempDir()
+	script := writeScript(t, dir, "out.sh", "#!/bin/sh\necho out-1\necho err-1 >&2\nprintf 'out-2'\n")
+	uid, gid := selfCredential()
+
+	var sink lineSink
+	var gotPID int
+	_, err := ExecRunner{}.Run(context.Background(), RunSpec{PHPBinary: script, Dir: dir, UID: uid, GID: gid}, RunHooks{
+		Output: func(pid int, stream string) io.Writer {
+			gotPID = pid
+			return sink.writer(stream)
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if gotPID <= 0 {
+		t.Errorf("Output pid = %d, want the child's pid", gotPID)
+	}
+	if got := strings.Join(sink.lines["stdout"], ""); got != "out-1\nout-2\n" {
+		t.Errorf("stdout lines = %q, want each line newline-terminated", got)
+	}
+	if got := strings.Join(sink.lines["stderr"], ""); got != "err-1\n" {
+		t.Errorf("stderr lines = %q", got)
+	}
+}
+
+func TestDrainLines_LongLineDoesNotStopDraining(t *testing.T) {
+	long := strings.Repeat("x", maxLineChunk*2+10)
+	var got []int
+	drainLines(strings.NewReader(long+"\nshort\n"), func(line []byte) { got = append(got, len(line)) })
+	total := 0
+	for _, n := range got[:len(got)-1] {
+		total += n
+	}
+	if total != len(long) || got[len(got)-1] != len("short") {
+		t.Errorf("chunk lengths = %v, want the long line split into chunks then \"short\"", got)
 	}
 }

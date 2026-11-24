@@ -7,7 +7,6 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
-	"net"
 	"time"
 
 	"github.com/DevDevil/laravel-queue-governor/internal/ipc"
@@ -30,9 +29,9 @@ const (
 func sendRequest[Req, Resp any](socketPath, kind string, req Req) (Resp, error) {
 	var zero Resp
 
-	conn, err := net.DialTimeout("unix", socketPath, dialTimeout)
+	conn, err := dialDaemon(socketPath)
 	if err != nil {
-		return zero, fmt.Errorf("connecting to %s: %w", socketPath, err)
+		return zero, err
 	}
 	defer conn.Close()
 

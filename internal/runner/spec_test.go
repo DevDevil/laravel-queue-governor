@@ -112,3 +112,21 @@ func TestDidWork(t *testing.T) {
 		}
 	}
 }
+
+func TestBuildScheduleSpec(t *testing.T) {
+	nice := 7
+	app := config.AppConfig{
+		Name: "shop-a", Path: "/var/www/shop-a", PHPBinary: "/usr/bin/php8.3",
+		Connection: "redis", Queues: []string{"default"}, Mode: config.ModeBatch, BatchSize: 5,
+		JSONOutput: true, Nice: &nice, ResolvedUID: 33, ResolvedGID: 34,
+	}
+	spec := BuildScheduleSpec(config.GlobalConfig{Nice: 3}, app)
+
+	want := []string{"artisan", "schedule:run"}
+	if !equalArgs(spec.Args, want) {
+		t.Errorf("Args = %v, want %v (no queue/json flags)", spec.Args, want)
+	}
+	if spec.PHPBinary != "/usr/bin/php8.3" || spec.Dir != "/var/www/shop-a" || spec.UID != 33 || spec.GID != 34 || spec.Nice != 7 {
+		t.Errorf("spec = %+v", spec)
+	}
+}

@@ -14,15 +14,30 @@ import "time"
 type DecisionEvent struct {
 	Timestamp time.Time `json:"ts"`
 	App       string    `json:"app"`
-	Decision  string    `json:"decision"` // "dispatched" | "skipped"
-	Reason    *string   `json:"reason"`
-	JobSeq    *int      `json:"job_seq"`
-	Load      float64   `json:"load"`
-	IOWait    float64   `json:"iowait"`
-	State     string    `json:"state"`
+
+	// Kind distinguishes a schedule:run decision ("schedule", PLAN.md
+	// §6.1) from a queue-worker decision (omitted/""). Schedule events
+	// are only emitted when an app's minute comes due, not every tick,
+	// and must not be applied to the app's queue state/reason by clients.
+	Kind string `json:"kind,omitempty"`
+
+	// Schedule is the app's schedule:run status right after this event
+	// (Kind "schedule" only), so clients can update it without waiting
+	// for the next snapshot.
+	Schedule *ScheduleStatus `json:"schedule,omitempty"`
+
+	Decision string  `json:"decision"` // "dispatched" | "skipped" | "completed" (Kind "schedule" only)
+	Reason   *string `json:"reason"`
+	JobSeq   *int    `json:"job_seq"`
+	Load     float64 `json:"load"`
+	IOWait   float64 `json:"iowait"`
+	State    string  `json:"state"`
 
 	// ActiveRuns is each currently in-flight run for this app (TUI.md
 	// apps panel's per-job sub-items) — omitempty since most ticks for
 	// most apps have none.
 	ActiveRuns []ActiveRun `json:"active_runs,omitempty"`
 }
+
+// KindSchedule marks a DecisionEvent as a schedule:run decision.
+const KindSchedule = "schedule"

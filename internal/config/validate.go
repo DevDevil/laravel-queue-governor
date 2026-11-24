@@ -88,6 +88,10 @@ func Validate(cfg *Config) (warnings []string, err error) {
 		warnings = append(warnings, appWarnings...)
 	}
 
+	logErrs, logWarnings := validateLogging(cfg)
+	errs = append(errs, logErrs...)
+	warnings = append(warnings, logWarnings...)
+
 	if len(errs) > 0 {
 		return warnings, &ValidationError{Errors: errs}
 	}
@@ -177,6 +181,10 @@ func validateApp(app *AppConfig, g *GlobalConfig, i int, seen map[string]bool) (
 	}
 	if app.MaxConcurrent <= 0 {
 		errs = append(errs, fmt.Sprintf("%s: max_concurrent must be > 0", label))
+	}
+
+	if !app.Scheduler.Enabled && (app.Scheduler.RespectLoad || app.Scheduler.Stagger) {
+		warnings = append(warnings, fmt.Sprintf("%s: scheduler.respect_load/stagger set but scheduler.enabled is false — schedule:run will not run", label))
 	}
 
 	if app.MaxLoad > g.MaxSystemLoad {

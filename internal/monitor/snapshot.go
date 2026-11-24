@@ -67,7 +67,39 @@ func Snapshot(now time.Time, decisions []scheduler.Decision, apps []*scheduler.A
 			SpikeCooldown: apps[i].Config.SpikeCooldown,
 			Priority:      apps[i].Config.Priority,
 			Nice:          apps[i].Config.Nice,
+
+			Schedule: ScheduleStatus(now, apps[i]),
 		}
 	}
 	return ipc.StatusSnapshot{Ts: now, Apps: statuses}
+}
+
+// ScheduleStatus converts an app's schedule:run state to its wire shape —
+// nil when the app doesn't have the scheduler enabled.
+func ScheduleStatus(now time.Time, app *scheduler.App) *ipc.ScheduleStatus {
+	st := app.Schedule
+	if st == nil {
+		return nil
+	}
+	next := st.NextDue(now)
+	out := &ipc.ScheduleStatus{
+		RespectLoad: app.Config.Scheduler.RespectLoad,
+		OffsetSec:   int(st.Offset() / time.Second),
+		Running:     st.Running(),
+		NextDue:     &next,
+	}
+	start, dur, exit, completed, ok := st.LastRun()
+	if ok {
+		out.LastStart = &start
+	}
+	if completed {
+		out.LastDurationMs = dur.Milliseconds()
+		out.LastExitCode = &exit
+	}
+	if at, reason, ok := st.LastSkip(); ok {
+		r := string(reason)
+		out.LastSkipAt = &at
+		out.LastSkipReason = &r
+	}
+	return out
 }

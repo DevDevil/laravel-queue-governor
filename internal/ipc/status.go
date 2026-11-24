@@ -65,6 +65,32 @@ type AppStatus struct {
 	// expect ActiveRuns[i].Job/.Status to ever be populated for this app
 	// at all, versus rendering the sub-item without them.
 	JSONOutput bool `json:"json_output"`
+
+	// Schedule is this app's schedule:run state (PLAN.md §6.1) — nil
+	// (omitted) unless the app has scheduler.enabled.
+	Schedule *ScheduleStatus `json:"schedule,omitempty"`
+}
+
+// ScheduleStatus is one app's schedule:run state. Pointers serialize as
+// explicit null for "never happened yet".
+type ScheduleStatus struct {
+	RespectLoad bool       `json:"respect_load"`
+	OffsetSec   int        `json:"offset_sec"` // seconds past each minute (0 without stagger)
+	Running     bool       `json:"running"`
+	NextDue     *time.Time `json:"next_due"`
+
+	// LastStart is when the most recent run started; LastDurationMs and
+	// LastExitCode describe the most recent *completed* run (LastExitCode
+	// is null until one has completed).
+	LastStart      *time.Time `json:"last_start"`
+	LastDurationMs int64      `json:"last_duration_ms"`
+	LastExitCode   *int       `json:"last_exit_code"`
+
+	// LastSkipAt/LastSkipReason are the most recent skipped minute
+	// (schedule_overlap, or a load/iowait/concurrency reason with
+	// respect_load); null if none skipped yet.
+	LastSkipAt     *time.Time `json:"last_skip_at"`
+	LastSkipReason *string    `json:"last_skip_reason"`
 }
 
 // StatusSnapshot is the daemon's response to a {"cmd":"status"} request —

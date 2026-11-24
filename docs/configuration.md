@@ -24,6 +24,7 @@ warnings only (printed, but the config still loads) — noted below.
 | `max_concurrent_jobs`     | int, **required > 0** | Hard cap on simultaneously in-flight `artisan` processes, across all apps. Works together with `max_system_load` — load is a lagging signal, so the concurrency cap is what prevents overshoot in the window before load reflects newly-dispatched jobs. |
 | `log_level`               | string, one of `debug`/`info`/`warn`/`error` | Daemon log verbosity. |
 | `nice`                    | int -20..19, default `0` | OS scheduling niceness applied to every worker process unless a specific app overrides it. `0` means "leave it untouched." Unrelated to `priority` below, which only affects `lqg`'s own fair-dispatch ordering, never OS-level CPU scheduling. |
+| `log_dir`                 | absolute path, optional | Write logs to files instead of stderr: `lqg.log` for the daemon itself plus one `<name>.log` per app. Must exist and be writable. See [Log files](#log-files). |
 
 ## `apps:` (a list)
 
@@ -44,7 +45,90 @@ warnings only (printed, but the config still loads) — noted below.
 | `spike_cooldown`  | int (seconds), **required ≥ 0** | Extra pause tacked on *after* `min_interval` has elapsed, if a load/I/O-wait spike was observed during/around the last run. |
 | `priority`        | int, optional | Higher = preferred when multiple apps are eligible in the same tick (fair round-robin dispatch, least-recently-served first). Has no effect on OS scheduling. |
 | `nice`            | int -20..19, optional | OS niceness for *this app's* worker only — overrides `global.nice`. Because it's genuinely optional (distinct from "unset"), you can explicitly set `nice: 0` to opt an app back into normal priority even while `global.nice` is non-zero elsewhere. |
+| `log_file`        | absolute path, optional | This app's log file, instead of `<log_dir>/<name>.log`. Also works without `global.log_dir` (then only this app gets a file). Its directory must exist. See [Log files](#log-files). |
 | `json_output`     | bool, default `false` | Adds `--json` to this app's `queue:work` invocation. Requires a Laravel version whose `queue:work` supports it. When set, the runner parses real per-job status (job class, `starting`/`success`/`released_after_exception`/`failed`) off stdout — shown live in `lqg watch`'s per-app sub-items, and used to gate opening a 2nd/3rd concurrent slot on *confirmed* work rather than an idle poll. |
+
+### `scheduler:` (optional, per app)
+
+Has `lqg` also run the app's Laravel scheduler — `php artisan schedule:run`,
+as the app's `user` — once a minute, so you don't need a separate cron entry
+per app and the scheduler shows up in `lqg status`/`lqg watch`.
+
+| Field           | Type    | Meaning |
+|------------------|---------|---------|
+| `enabled`        | bool, default `false` | Run `schedule:run` every minute. `false` (or no `scheduler:` block) = exactly the old behaviour. |
+| `respect_load`   | bool, default `false` | Skip a minute when this app's or the global load/I/O-wait ceiling is exceeded, or `max_concurrent_jobs` is full. Off by default: scheduled tasks are time-critical. |
+| `stagger`        | bool, default `false` | Start at a fixed per-app second within the minute (derived from the app name) instead of `:00`, so many apps don't all start at once. |
+
+Behaviour:
+
+- **Never overlaps itself:** if the previous `schedule:run` for the app is
+  still running when the next minute comes due, that minute is skipped
+  (`schedule_overlap`, logged).
+- **Counts towards `max_concurrent_jobs`:** while it runs, queue workers get
+  one slot fewer. With `respect_load: false` it starts even when that cap is
+  full.
+- Setting `respect_load`/`stagger` without `enabled: true` gives a warning.
+- Enable/disable by editing the file and `systemctl reload lqg` — no restart.
+  Not changeable from the live-tune overlay.
+- Remove the app's old cron entry (`* * * * * php artisan schedule:run`)
+  when you enable this, or the scheduler runs twice.
+
+```yaml
+apps:
+  - name: shop-a
+    # ... queue settings ...
+    scheduler:
+      enabled: true
+      respect_load: false
+      stagger: true
+```
+
+## Log files
+
+By default everything `lqg` logs goes to stderr, which under systemd means
+the journal (`journalctl -u lqg`), and the output of the `artisan` processes
+themselves is not kept. Set `global.log_dir` to split it up:
+
+```yaml
+global:
+  log_dir: /var/log/lqg        # the systemd unit creates this (LogsDirectory=lqg)
+
+apps:
+  - name: shop-a               # → /var/log/lqg/shop-a.log
+  - name: shop-b
+    log_file: /srv/logs/shop-b-lqg.log   # optional override
+```
+
+- **`lqg.log`** — the daemon itself: startup, config reloads, errors, and when
+  the global load/I/O-wait ceiling starts or stops holding back all apps.
+- **`<name>.log`** — everything about one app: the stdout/stderr of its
+  `queue:work` and `schedule:run` processes, each dispatch, skips (only when
+  the reason changes, not every tick), and each run's exit code and duration.
+
+```
+2026-11-24T14:02:05.120+01:00 dispatched job #42 (load 0.84, iowait 1.2%)
+2026-11-24T14:02:05.611+01:00 [queue:work pid 81231 out] {"status":"starting","job":"App\Jobs\SendInvoice",...}
+2026-11-24T14:02:06.002+01:00 [queue:work pid 81231 err] PHP Warning:  Undefined array key "x" in ...
+2026-11-24T14:02:06.140+01:00 run finished: exit 0 after 1.02s
+2026-11-24T14:02:06.140+01:00 skipped: min_interval (state cooldown, load 0.84, iowait 1.2%)
+```
+
+Rules:
+
+- Files are created `0640`, owned `root:lqg` — members of the `lqg` group can
+  read them.
+- An app name has to work as a file name (`A-Z a-z 0-9 . _ -`) unless that app
+  sets `log_file`; an app called `lqg` would clash with `lqg.log`, so it needs
+  a `log_file` too. Two logs pointing at the same file is an error.
+- `lqg validate` checks the directories exist and are writable (run it with
+  `sudo` — as a normal user "not writable" is only a warning).
+- Adding an app and reloading (`systemctl reload lqg`) creates its file right
+  away; if a file can't be opened the reload is rejected and the old config
+  kept.
+- Rotation: `kill -USR1` (or `systemctl kill -s USR1 --kill-whom=main lqg` — without `--kill-whom=main` systemd signals the PHP workers too, and SIGUSR1 kills them) reopens all log
+  files. `install.sh` installs `packaging/logrotate.conf` as
+  `/etc/logrotate.d/lqg`, which does exactly that after rotating.
 
 ## A two-app example
 
@@ -75,6 +159,9 @@ apps:
     priority: 10
     nice: 5
     json_output: true
+    scheduler:
+      enabled: true
+      stagger: true
 
   - name: squaremanager
     path: /var/www/squaremanager

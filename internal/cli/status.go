@@ -14,11 +14,12 @@ import (
 // reason if idle/throttled) to w.
 func RenderStatusTable(w io.Writer, snap ipc.StatusSnapshot) {
 	tw := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(tw, "NAME\tSTATE\tLOAD\tIOWAIT\tJOBS\tLAST DISPATCH\tREASON")
+	fmt.Fprintln(tw, "NAME\tSTATE\tLOAD\tIOWAIT\tJOBS\tLAST DISPATCH\tREASON\tSCHEDULER")
 	for _, a := range snap.Apps {
-		fmt.Fprintf(tw, "%s\t%s\t%.2f\t%.1f%%\t%d\t%s\t%s\n",
+		fmt.Fprintf(tw, "%s\t%s\t%.2f\t%.1f%%\t%d\t%s\t%s\t%s\n",
 			a.Name, a.State, a.Load, a.IOWait, a.JobsSession,
-			formatLastDispatch(a.LastDispatch), formatReason(a.Reason))
+			formatLastDispatch(a.LastDispatch), formatReason(a.Reason),
+			FormatScheduleSummary(a.Schedule, snap.Ts))
 	}
 	tw.Flush()
 }
