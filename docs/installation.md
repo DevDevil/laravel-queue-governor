@@ -33,6 +33,9 @@ sudo ./packaging/install.sh ./lqg
 more:
 
 - Creates the `lqg` system group, if it doesn't already exist.
+- Adds the user who ran `sudo ./install.sh` (`$SUDO_USER`) to the `lqg`
+  group, so they can use `lqg status`/`lqg watch` without `sudo` — after
+  logging out and back in (or `newgrp lqg`); the script reminds you.
 - Installs the binary to `/usr/local/bin/lqg`.
 - Installs `packaging/lqg.service` to `/etc/systemd/system/lqg.service`.
 - Installs `packaging/config.sample.yaml` to `/etc/lqg/config.yaml` — **only
@@ -107,6 +110,12 @@ The daemon's control socket (`/run/lqg/lqg.sock` by default) is owned
 sudo usermod -aG lqg "$USER"
 # log out and back in for the new group membership to take effect
 ```
+
+`install.sh` already does this for the user who ran it. If you lack access,
+`lqg status`/`lqg watch` say so explicitly — including whether you're not in
+the group at all, or were added but your current login session predates it —
+instead of a bare `permission denied` (or, for `watch`, a dashboard stuck on
+"disconnected"). The same goes for a daemon that isn't running.
 
 ## Upgrading / redeploying
 

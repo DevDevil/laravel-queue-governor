@@ -32,6 +32,12 @@ func newWatchCmd() *cobra.Command {
 			// a real terminal and piping should stay valid, parseable
 			// JSON either way (ticket 13).
 			if isTTY && !plain {
+				// Fail fast with the real cause (no permission, daemon
+				// not running) instead of opening a dashboard that just
+				// shows "disconnected — reconnecting…" forever.
+				if err := cli.CheckDaemon(socketPath); err != nil {
+					return err
+				}
 				return cli.RunDashboardTUI(ctx, socketPath)
 			}
 

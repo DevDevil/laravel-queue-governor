@@ -34,6 +34,20 @@ else
   echo "group already exists: lqg"
 fi
 
+# Let the admin who ran `sudo ./install.sh` use `lqg status`/`lqg watch`
+# without sudo: the control socket is root:lqg 0660 inside a root:lqg 0750
+# runtime dir, so only lqg group members can reach it.
+ADDED_USER=""
+if [[ -n "${SUDO_USER:-}" && "$SUDO_USER" != "root" ]]; then
+  if id -nG "$SUDO_USER" | tr ' ' '\n' | grep -qx lqg; then
+    echo "user already in group lqg: $SUDO_USER"
+  else
+    usermod -aG lqg "$SUDO_USER"
+    ADDED_USER="$SUDO_USER"
+    echo "added user to group lqg: $SUDO_USER"
+  fi
+fi
+
 install -o root -g root -m 0755 "$BINARY" "$PREFIX/lqg"
 echo "installed binary: $PREFIX/lqg"
 
@@ -60,5 +74,15 @@ done. next steps:
      write their own logs/cache under ProtectSystem=strict
   3. sudo $PREFIX/lqg validate $CONFIG_DIR/config.yaml
   4. sudo systemctl enable --now lqg
-  5. lqg status   # add yourself to the "lqg" group first if not root
+  5. lqg status   # members of the "lqg" group (or root) can reach the socket
 EOF
+
+if [[ -n "$ADDED_USER" ]]; then
+  cat <<EOF
+
+NOTE: $ADDED_USER was just added to the "lqg" group. That only applies to
+new logins — log out and back in (or run: newgrp lqg) before using
+lqg status / lqg watch without sudo. Other users who need access:
+  sudo usermod -aG lqg <user>
+EOF
+fi
